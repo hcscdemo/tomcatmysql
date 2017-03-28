@@ -1,0 +1,139 @@
+---
+- hosts: database
+  pre_tasks:
+  - name: Update apt cache.
+    apt: update_cache=yes cache_valid_time=86400
+    
+  tasks:
+  - name: Install MySQL Server
+    apt: name=mysql-server
+
+  - name: Install MySQL Client
+    apt: name=mysql-client
+
+  - name: Replace my.cnf
+    copy: src=my.cnf dest=/etc/mysql/my.cnf
+
+  - name: Restart MySQL
+    service: name=mysql state=restarted
+    tags: restart_mysql
+    
+  - name: Install MySQLdb python module
+    package: name=python-mysqldb state=present
+
+  - name: Install apt python module
+    package: name=python-apt state=present
+    
+  - name: Check if DB exists
+    shell: mysql -e 'SHOW DATABASES;' | grep {{ db_name }}
+    ignore_errors: yes
+    register: dbstatus
+    
+  - name: Create testdb Database
+    mysql_db: name={{ db_name }} state=present
+
+  - name: Create Database user
+    mysql_user: name={{ db_user_name }} password={{ db_user_password }} host={{ item }} priv='{{ db_name }}.*:ALL' state=present
+    with_items:
+      - '%'
+      - 'localhost'
+
+  - name: Init DB copy file
+    copy: src=init-db.sql dest=/tmp/init-db.sql
+    
+  - name: Init DB
+    mysql_db: name={{ db_name }} state=import target=/tmp/init-db.sql
+    when:  dbstatus.rc !=0
+    
+- hosts: web
+  pre_tasks:
+  - name: Update apt cache.
+    apt: update_cache=yes cache_valid_time=86400
+    
+  roles:
+  - role: geerlingguy.java
+
+  tasks:
+  - name: Set Java Home for Debian
+    set_fact: java_home="JAVA_HOME=/usr/lib/jvm/java-7-openjdk-amd64"
+
+  - name: Add group "tomcat"
+    group: name=tomcat
+    
+  - name: Add user "tomcat"
+    user: name=tomcat group=tomcat home=/usr/share/tomcat createhome=no
+    become: true
+    become_method: sudo
+
+  - name: Install haveged
+    apt: name=haveged state=present
+    
+  - name: Download Tomcat
+    get_url: url=https://archive.apache.org/dist/tomcat/tomcat-8/v8.5.9/bin/apache-tomcat-8.5.9.tar.gz
+      dest=/opt/apache-tomcat-8.5.9.tar.gz timeout=5
+
+  - name: Extract archive
+    unarchive: src=/opt/apache-tomcat-8.5.9.tar.gz dest=/opt copy=no
+
+  - name: Symlink install directory
+    file: src=/opt/apache-tomcat-8.5.9 path=/usr/share/tomcat state=link
+
+  - name: Create setenv
+    copy: content="{{ java_home }}" dest="/usr/share/tomcat/bin/setenv.sh"
+
+  - name: Change ownership of Tomcat installation
+    file: path=/usr/share/tomcat/ owner=tomcat group=tomcat state=directory recurse=yes
+
+  - name: Install Tomcat init script
+    copy: src=tomcat-init.sh dest=/etc/init.d/tomcat mode=0755
+
+  - name: Config Tomcat Server
+    template: src=server.xml dest=/usr/share/tomcat/conf/server.xml
+
+  - name: Config Tomcat User
+    template: src=tomcat-users.xml dest=/usr/share/tomcat/conf/tomcat-users.xml
+
+  - name: Config manager context
+    copy: src=tomcat-manager-content.xml dest=/usr/share/tomcat/webapps/manager/META-INF/context.xml
+
+  - name: Config host-manager context
+    copy: src=tomcat-manager-content.xml dest=/usr/share/tomcat/webapps/host-manager/META-INF/context.xml
+
+  - name: Install unzip
+    apt: name=unzip state=present
+
+  - name: Download mysql jar
+    unarchive:
+      src: http://www.java2s.com/Code/JarDownload/mysql/mysql-connector-java-5.1.6-bin.jar.zip
+      dest: /usr/share/tomcat/lib
+      remote_src: True
+
+  - name: Change owner mysql jar
+    file:
+      path: /usr/share/tomcat/lib/mysql-connector-java-5.1.6-bin.jar
+      owner: tomcat
+      group: tomcat
+
+  - name: Clean up deploy dir
+    file:
+      state: absent
+      path: "/usr/share/tomcat/webapps/hello/"
+    tags: deployhello
+
+  - name: Clean up war file
+    file:
+      state: absent
+      path: "/usr/share/tomcat/webapps/hello.war"
+    tags: deployhello
+
+  - name: Get war file
+    get_url: url="{{ hello_repo_url }}{{ hello_build_number }}/hello.war" dest=/usr/share/tomcat/webapps/hello.war mode=0755
+    tags: deployhello
+
+  - name: Restart Tomcat
+    service: name=tomcat state=restarted
+    tags: [deployhello, restart_tomcat]
+
+  - name: Start Tomcat
+    service: name=tomcat state=started enabled=yes
+    tags: start_tomcat
